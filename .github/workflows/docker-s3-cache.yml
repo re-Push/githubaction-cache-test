@@ -1,0 +1,170 @@
+name: Docker Build with S3 Cache
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  # 수동으로도 실행 가능하게 설정
+  workflow_dispatch:
+
+jobs:
+  build-with-s3-cache:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # 일반 빌드 캐시를 S3에 저장하는 설정
+      - name: Retrieve node_modules cache from S3
+        uses: leroy-merlin-br/action-s3-cache@v1
+        with:
+          action: get
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-northeast-3  # 오사카 리전
+          bucket: s3-github-action-jaemin
+          key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
+
+      # Node.js 환경 설정
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      # 의존성 설치 (캐시가 없을 경우에만 전체 설치)
+      - name: Install Dependencies
+        run: |
+          if [ ! -d "node_modules" ]; then
+            echo "Cache miss, installing dependencies..."
+            npm ci
+          else
+            echo "Cache hit, using cached node_modules"
+            npm ci --prefer-offline
+          fi
+
+      # 빌드 실행
+      - name: Build
+        run: |
+          # 빌드 시간 측정 시작
+          START_TIME=$SECONDS
+          
+          # 실제 빌드 명령 (예시)
+          npm run build || npm run build:prod || echo "No build script found, creating dummy build"
+          
+          # 더미 빌드 생성 (빌드 스크립트가 없을 경우)
+          if [ ! -d "dist" ]; then
+            mkdir -p dist
+            echo "console.log('Hello from cached build!');" > dist/index.js
+          fi
+          
+          # 빌드 시간 측정 종료 및 출력
+          ELAPSED_TIME=$(($SECONDS - $START_TIME))
+          echo "Build completed in $ELAPSED_TIME seconds."
+
+      # S3에 캐시 저장
+      - name: Save node_modules cache to S3
+        uses: leroy-merlin-br/action-s3-cache@v1
+        with:
+          action: put
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-northeast-3  # 오사카 리전
+          bucket: s3-github-action-jaemin
+          key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
+          path: node_modules
+
+  docker-build-with-s3-cache:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # AWS 자격 증명 설정
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-northeast-3
+
+      # QEMU 설정 (다중 플랫폼 빌드 지원)
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+      
+      # Docker BuildX 설정
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: |
+            image=moby/buildkit:master
+      
+      # ECR 로그인
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+      
+      # 이미지 태그 생성
+      - name: Set image tag
+        run: |
+          echo "IMAGE_TAG=${GITHUB_SHA::8}" >> $GITHUB_ENV
+      
+      # 빌드 시간 측정 - 첫 번째 빌드 (캐시 없음)
+      - name: Build with S3 cache and push to ECR - First Run
+        id: build-first
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true  # ECR에 이미지 푸시
+          tags: |
+            211125752707.dkr.ecr.ap-northeast-3.amazonaws.com/repush/build-cache-test:latest
+            211125752707.dkr.ecr.ap-northeast-3.amazonaws.com/repush/build-cache-test:${{ env.IMAGE_TAG }}
+          cache-from: type=s3,region=ap-northeast-3,bucket=s3-github-action-jaemin,name=docker-cache
+          cache-to: type=s3,region=ap-northeast-3,bucket=s3-github-action-jaemin,name=docker-cache,mode=max
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      
+      # 첫 번째 빌드 시간 출력
+      - name: Display first build time
+        run: echo "First build completed in ${{ steps.build-first.outputs.duration || '(duration not available)' }}"
+      
+      # 약간의 변경사항 추가 (캐시 효과 테스트용)
+      - name: Make small change
+        run: |
+          echo "// Small change to test caching" >> README.md
+          
+      # 빌드 시간 측정 - 두 번째 빌드 (캐시 사용)
+      - name: Build with S3 cache and push to ECR - Second Run
+        id: build-second
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true  # ECR에 이미지 푸시
+          tags: |
+            211125752707.dkr.ecr.ap-northeast-3.amazonaws.com/repush/build-cache-test:cached-${{ env.IMAGE_TAG }}
+          cache-from: type=s3,region=ap-northeast-3,bucket=s3-github-action-jaemin,name=docker-cache
+          cache-to: type=s3,region=ap-northeast-3,bucket=s3-github-action-jaemin,name=docker-cache,mode=max
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      
+      # 두 번째 빌드 시간 출력
+      - name: Display second build time
+        run: echo "Second build completed in ${{ steps.build-second.outputs.duration || '(duration not available)' }}"
+      
+      # 캐시 사용 결과 및 속도 향상 비교
+      - name: Cache effectiveness report
+        run: |
+          echo "Build Cache Report:"
+          echo "===================="
+          echo "First build time: ${{ steps.build-first.outputs.duration || 'N/A' }}"
+          echo "Second build time: ${{ steps.build-second.outputs.duration || 'N/A' }}"
+          echo "Cache location: s3://s3-github-action-jaemin/docker-cache"
+          echo "ECR Images pushed:"
+          echo "- 211125752707.dkr.ecr.ap-northeast-3.amazonaws.com/repush/build-cache-test:latest"
+          echo "- 211125752707.dkr.ecr.ap-northeast-3.amazonaws.com/repush/build-cache-test:${{ env.IMAGE_TAG }}"
+          echo "- 211125752707.dkr.ecr.ap-northeast-3.amazonaws.com/repush/build-cache-test:cached-${{ env.IMAGE_TAG }}" 
