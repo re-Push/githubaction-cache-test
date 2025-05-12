@@ -4,7 +4,7 @@ FROM node:18-alpine AS deps
 WORKDIR /app
 
 # 패키지 파일 복사 (캐시 최적화)
-COPY package.json package-lock.json* ./
+COPY package.json package-lock.json ./
 RUN npm ci
 
 # 빌드 단계
