@@ -26,6 +26,7 @@ jobs:
           aws-region: ap-northeast-3  # 오사카 리전
           bucket: s3-github-action-jaemin
           key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
+          artifacts: node_modules/**/*
 
       # Node.js 환경 설정
       - name: Set up Node.js
@@ -74,7 +75,7 @@ jobs:
           aws-region: ap-northeast-3  # 오사카 리전
           bucket: s3-github-action-jaemin
           key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
-          path: node_modules
+          artifacts: node_modules/**/*
 
   docker-build-with-s3-cache:
     runs-on: ubuntu-latest
